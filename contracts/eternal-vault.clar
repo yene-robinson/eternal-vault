@@ -202,3 +202,158 @@
         )
         ;; Execute NFT transfers
         (map transfer-nft (get nft-tokens beneficiary-data))
+
+        ;; Mark inheritance as claimed
+        (map-set beneficiaries { beneficiary: tx-sender }
+          (merge beneficiary-data { claimed: true })
+        )
+
+        ;; Transfer net inheritance amount
+        (as-contract (stx-transfer? (- share-amount tax-amount) contract-caller tx-sender))
+      )
+    )
+  )
+)
+
+;; PHASED INHERITANCE RELEASE SYSTEM
+
+(define-map inheritance-phases
+  { beneficiary: principal }
+  {
+    phase-1-claimed: bool,
+    phase-2-claimed: bool,
+    phase-1-amount: uint,
+    phase-2-amount: uint,
+  }
+)
+
+;; First phase inheritance claim with risk mitigation
+(define-private (claim-phase-1 (phase-data {
+  phase-1-claimed: bool,
+  phase-2-claimed: bool,
+  phase-1-amount: uint,
+  phase-2-amount: uint,
+}))
+  (begin
+    (asserts! (not (get phase-1-claimed phase-data)) ERR-ALREADY-CLAIMED)
+    (let ((amount (/
+        (* (stx-get-balance (as-contract tx-sender))
+          (get phase-1-amount phase-data)
+        )
+        u100
+      )))
+      (begin
+        (map-set inheritance-phases { beneficiary: tx-sender }
+          (merge phase-data { phase-1-claimed: true })
+        )
+        (as-contract (stx-transfer? amount contract-caller tx-sender))
+      )
+    )
+  )
+)
+
+;; DISPUTE RESOLUTION FRAMEWORK
+
+(define-map disputes
+  { disputer: principal }
+  {
+    evidence-hash: (buff 32),
+    resolved: bool,
+  }
+)
+
+(define-map dispute-metadata
+  { disputer: principal }
+  {
+    resolution-votes: uint,
+    timestamp: uint,
+  }
+)
+
+(define-map resolution-votes
+  {
+    dispute-id: principal,
+    voter: principal,
+  }
+  bool
+)
+
+(define-data-var resolution-threshold uint u3)
+
+;; Initiates dispute with cryptographic evidence
+(define-public (raise-dispute (evidence-hash (buff 32)))
+  (let ((beneficiary-data (unwrap! (map-get? beneficiaries { beneficiary: tx-sender })
+      ERR-NOT-AUTHORIZED
+    )))
+    (begin
+      (asserts! (not (is-eq evidence-hash 0x)) ERR-INVALID-HASH)
+      (asserts! (is-none (map-get? disputes { disputer: tx-sender }))
+        ERR-DISPUTE-EXISTS
+      )
+
+      (map-set disputes { disputer: tx-sender } {
+        evidence-hash: evidence-hash,
+        resolved: false,
+      })
+      (ok true)
+    )
+  )
+)
+
+;; Automated dispute resolution mechanism
+(define-private (resolve-dispute (disputer principal))
+  (match (map-get? disputes { disputer: disputer })
+    dispute-data (begin
+      (map-set disputes { disputer: disputer }
+        (merge dispute-data { resolved: true })
+      )
+      true
+    )
+    false
+  )
+)
+
+;; EMERGENCY & ADMINISTRATIVE CONTROLS
+
+;; Contract deactivation for emergency scenarios
+(define-public (deactivate-contract)
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    (var-set is-active false)
+    (ok true)
+  )
+)
+
+;; Updates oracle confirmation threshold
+(define-public (update-required-confirmations (new-count uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    (asserts! (> new-count u0) ERR-INVALID-CONFIRMATION-COUNT)
+    (var-set required-confirmations new-count)
+    (ok true)
+  )
+)
+
+;; READ-ONLY INTERFACE
+
+;; Retrieves comprehensive beneficiary information
+(define-read-only (get-beneficiary-info (beneficiary principal))
+  (map-get? beneficiaries { beneficiary: beneficiary })
+)
+
+;; Returns complete contract status overview
+(define-read-only (get-contract-status)
+  {
+    active: (var-get is-active),
+    death-confirmed: (var-get death-confirmed),
+    confirmation-count: (var-get confirmation-count),
+    required-confirmations: (var-get required-confirmations),
+    last-will-hash: (var-get last-will-hash),
+    inheritance-tax: (var-get inheritance-tax),
+  }
+)
+
+;; Queries NFT ownership records
+(define-read-only (get-nft-owner (token-id uint))
+  (map-get? nft-ownership token-id)
+)
